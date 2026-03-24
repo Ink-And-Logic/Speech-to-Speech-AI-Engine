@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>🎤 AI Translator Pro: GSoC Edition</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; text-align: center; padding: 40px; background: #f8f9fa; color: #333; }
+        .box { background: white; padding: 30px; border-radius: 20px; display: inline-block; box-shadow: 0 10px 30px rgba(0,0,0,0.1); width: 450px; }
+        canvas { width: 100%; height: 100px; background: #000; border-radius: 10px; margin: 20px 0; }
+        #recordBtn { background: #28a745; color: white; padding: 15px 30px; border-radius: 10px; border: none; font-weight: bold; cursor: pointer; width: 100%; }
+        #recordBtn.recording { background: #dc3545; animation: pulse 1.5s infinite; }
+        #status { margin-top: 15px; font-weight: bold; color: #007bff; min-height: 24px; }
+        .output-box { margin-top: 15px; padding: 15px; border-radius: 8px; text-align: left; font-size: 0.95em; min-height: 40px; }
+        #result { background: #f1f3f4; border-left: 5px solid #5f6368; }
+        #translation { background: #e8f0fe; border-left: 5px solid #1a73e8; color: #1967d2; font-weight: bold; margin-top: 10px; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        #history { 
+            margin-top: 25px; 
+            max-height: 250px; 
+            overflow-y: auto; 
+            border-top: 2px solid #eee; 
+            padding: 15px 5px;
+        }
+        .history-item { 
+            background: #ffffff;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h2>🎤 AI Voice Translator</h2>
+        <p style="font-size: 0.8em; color: #666;">Status: Phase 3 Visual Feedback</p>
+        
+        <select id="langSelect" style="width: 100%; padding: 10px; margin-bottom: 15px; border-radius: 8px;">
+            <option value="hi">Hindi (हिन्दी)</option>
+            <option value="es">Spanish (Español)</option>
+            <option value="ja">Japanese (日本語)</option>
+            <option value="fr">French (Français)</option>
+        </select>
+
+        <canvas id="waveform"></canvas>
+
+        <button id="recordBtn">Start Smart Record</button>
+        <div id="status">Ready...</div>
+        
+        <div id="result" class="output-box">Detection...</div>
+        <div id="translation" class="output-box">Translation...</div>
+        <div id="history">
+            <p style="color:#999; text-align:center;">History will appear here...</p>
+        </div>
+    </div>
+
+    <script>
+        let mediaRecorder, audioChunks = [], audioContext, analyser, silenceTimer;
+        const canvas = document.getElementById('waveform');
+        const canvasCtx = canvas.getContext('2d');
+
+        const recordBtn = document.getElementById('recordBtn');
+        const status = document.getElementById('status');
+
+        function drawWaveform() {
+            if (!analyser) return;
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            const draw = () => {
+                if (!mediaRecorder || mediaRecorder.state !== "recording") {
+                    canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+                    return;
+                }
+                requestAnimationFrame(draw);
+                analyser.getByteTimeDomainData(dataArray);
+
+                canvasCtx.fillStyle = "rgb(0, 0, 0)";
+                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+                canvasCtx.lineWidth = 2;
+                canvasCtx.strokeStyle = "rgb(0, 255, 0)";
+                canvasCtx.beginPath();
+
+                let sliceWidth = canvas.width * 1.0 / bufferLength;
+                let x = 0;
+
+                for (let i = 0; i < bufferLength; i++) {
+                    let v = dataArray[i] / 128.0;
+                    let y = v * canvas.height / 2;
+                    if (i === 0) canvasCtx.moveTo(x, y);
+                    else canvasCtx.lineTo(x, y);
+                    x += sliceWidth;
+                }
+                canvasCtx.lineTo(canvas.width, canvas.height / 2);
+                canvasCtx.stroke();
+            };
+            draw();
+        }
+
+        recordBtn.onclick = async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioContext = new AudioContext();
+            const source = audioContext.createMediaStreamSource(stream);
+            analyser = audioContext.createAnalyser();
+            source.connect(analyser);
+
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+
+            mediaRecorder.onstop = async () => {
+                status.innerText = "⏳ Processing...";
+                const blob = new Blob(audioChunks, { type: 'audio/webm' });
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = () => sendToServer(reader.result.split(',')[1]);
+                stream.getTracks().forEach(t => t.stop());
+                audioContext.close();
+            };
+
+            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+            mediaRecorder.start();
+            
+            // Start VAD logic & Visualizer
+            recordBtn.classList.add('recording');
+            status.innerText = "Listening...";
+            drawWaveform();
+            monitorSilence();
+        };
+
+        function monitorSilence() {
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            const check = () => {
+                if (mediaRecorder.state !== "recording") return;
+                analyser.getByteFrequencyData(dataArray);
+                let avg = dataArray.reduce((a,b) => a+b) / bufferLength;
+                if (avg < 15) {
+                    if (!silenceTimer) silenceTimer = setTimeout(() => mediaRecorder.stop(), 1500);
+                } else {
+                    clearTimeout(silenceTimer); silenceTimer = null;
+                }
+                requestAnimationFrame(check);
+            };
+            check();
+        }
+
+        async function sendToServer(base64) {
+            const resp = await fetch('http://127.0.0.1:8888/transcribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    audio_b64: base64,
+                    chunk_id: Date.now().toString(), // We add this back for safety
+                    target_lang: document.getElementById('langSelect').value
+                })
+
+            });
+                
+            const data = await resp.json();
+            if (data.status === "success" && data.transcript.trim() !== "") {
+                // 1. Update UI
+                document.getElementById('result').innerText = "Detected: " + data.transcript;
+                document.getElementById('translation').innerText = "Translated: " + data.translation;
+                status.innerText = "✅ Done!";
+                
+                // 2. Add to History (Only if there is actual text!)
+                const historyBox = document.getElementById('history');
+                
+                // Clear the "History will appear here" placeholder if it's there
+                if (historyBox.querySelector('p')) { historyBox.innerHTML = ''; }
+                const item = document.createElement('div');
+                item.className = 'history-item';
+                item.innerHTML = `
+                <div class="history-orig">🗣️ ${data.transcript}</div>
+                <div class="history-trans">🌐 ${data.translation}</div>
+                `;
+                historyBox.prepend(item);
+                
+                // 3. Speak the translation
+                speak(data.translation);
+            } else if (data.transcript.trim() === "") {
+                status.innerText = "⚠️ No speech detected. Try again.";
+            }
+            
+            recordBtn.classList.remove('recording');
+        }
+
+        function speak(text) {
+            window.speechSynthesis.cancel();
+            const msg = new SpeechSynthesisUtterance(text);
+            const voices = window.speechSynthesis.getVoices();
+            const targetLang = document.getElementById('langSelect').value;
+            msg.voice = voices.find(v => v.lang.startsWith(targetLang)) || voices[0];
+            msg.lang = targetLang === 'hi' ? 'hi-IN' : targetLang;
+            window.speechSynthesis.speak(msg);
+        }
+    </script>
+</body>
+</html>
